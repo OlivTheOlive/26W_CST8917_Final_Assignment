@@ -1,0 +1,55 @@
+@base = https://versionbolive.azurewebsites.net
+
+### Validate — valid expense
+POST {{base}}/api/validate
+Content-Type: application/json
+
+{
+  "employee_name": "Test User",
+  "employee_email": "user@example.com",
+  "amount": 50,
+  "category": "travel",
+  "description": "Taxi",
+  "manager_email": "mgr@example.com"
+}
+
+### Validate — missing field (expect valid: false)
+POST {{base}}/api/validate
+Content-Type: application/json
+
+{
+  "employee_name": "X",
+  "employee_email": "x@example.com",
+  "amount": 10,
+  "category": "supplies"
+}
+
+### Register pending + poll + manager decision (>= $100 path)
+POST {{base}}/api/pending/register
+Content-Type: application/json
+
+{
+  "expense": {
+    "employee_name": "Mgr Path",
+    "employee_email": "emp@example.com",
+    "amount": 150,
+    "category": "meals",
+    "description": "Dinner",
+    "manager_email": "mgr@example.com"
+  },
+  "timeout_seconds": 300
+}
+
+@cid = 64d9690e-e3c6-4954-862f-731bfc14ebc1
+
+GET {{base}}/api/pending/{{cid}}/status
+
+### Manager approves
+POST {{base}}/api/pending/{{cid}}/decision
+Content-Type: application/json
+
+{
+  "approved": true
+}
+
+GET {{base}}/api/pending/{{cid}}/status
