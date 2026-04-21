@@ -1,0 +1,105 @@
+### Azure Functions — local base URL (Core Tools default port 7071)
+@baseUrl = http://localhost:7071
+@apiPath = /api
+
+### 1 — Valid expense under $100 → auto-approved
+# Poll GET runtimeStatus URL from the 202 response until completed; output.outcome should be "approved"
+POST {{baseUrl}}{{apiPath}}/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Alex Lee",
+  "employee_email": "alex@example.com",
+  "amount": 42.50,
+  "category": "travel",
+  "description": "Taxi to airport",
+  "manager_email": "mgr@example.com"
+}
+
+### 2 — Valid expense >= $100, manager approves → approved
+# Step A: POST /expenses, copy orchestrationInstanceId from response body (or Location header).
+# Step B: POST /manager/{instanceId} with body below.
+# Step C: Poll status until completed; output.outcome should be "approved"
+POST {{baseUrl}}{{apiPath}}/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Alex Lee",
+  "employee_email": "alex@example.com",
+  "amount": 150.00,
+  "category": "meals",
+  "description": "Team dinner",
+  "manager_email": "mgr@example.com"
+}
+
+### 2b — Manager approval (replace INSTANCE_ID from step A response)
+@instanceId = PASTE_INSTANCE_ID_HERE
+POST {{baseUrl}}{{apiPath}}/manager/{{instanceId}}
+Content-Type: application/json
+
+{
+  "decision": "approve"
+}
+
+### 3 — Valid expense >= $100, manager rejects → rejected
+POST {{baseUrl}}{{apiPath}}/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Alex Lee",
+  "employee_email": "alex@example.com",
+  "amount": 200.00,
+  "category": "supplies",
+  "description": "Office supplies",
+  "manager_email": "mgr@example.com"
+}
+
+### 3b — Manager rejection (replace INSTANCE_ID)
+@instanceReject = PASTE_INSTANCE_ID_HERE
+POST {{baseUrl}}{{apiPath}}/manager/{{instanceReject}}
+Content-Type: application/json
+
+{
+  "decision": "reject"
+}
+
+### 4 — Valid expense >= $100, no manager response → escalated
+# Do NOT call /manager/{instanceId}. Wait longer than APPROVAL_TIMEOUT_SECONDS (see local.settings).
+# Default example uses 90s; poll status until completed; output.outcome should be "escalated"
+POST {{baseUrl}}{{apiPath}}/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Alex Lee",
+  "employee_email": "alex@example.com",
+  "amount": 300.00,
+  "category": "equipment",
+  "description": "Monitor",
+  "manager_email": "mgr@example.com"
+}
+
+### 5 — Missing required fields → validation_error
+POST {{baseUrl}}{{apiPath}}/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Alex Lee",
+  "employee_email": "alex@example.com",
+  "amount": 50.00
+}
+
+### 6 — Invalid category → validation_error
+POST {{baseUrl}}{{apiPath}}/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Alex Lee",
+  "employee_email": "alex@example.com",
+  "amount": 50.00,
+  "category": "invalid_cat",
+  "description": "Test",
+  "manager_email": "mgr@example.com"
+}
+
+### Helper — status (replace STATUS_URL from 202 response body: statusQueryGetUri)
+# GET {{statusUrl}}
