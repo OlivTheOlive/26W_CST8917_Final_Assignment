@@ -1,105 +1,97 @@
-### Azure Functions — local base URL (Core Tools default port 7071)
 @baseUrl = http://localhost:7071
-@apiPath = /api
 
-### 1 — Valid expense under $100 → auto-approved
-# Poll GET runtimeStatus URL from the 202 response until completed; output.outcome should be "approved"
-POST {{baseUrl}}{{apiPath}}/expenses
+@instanceId = a3d800930c2a464f8ace41455d7693e0
+
+### 1) Valid expense under $100 — expected: auto-approved
+POST {{baseUrl}}/api/expenses
 Content-Type: application/json
 
 {
-  "employee_name": "Alex Lee",
-  "employee_email": "alex@example.com",
+  "employee_name": "Ada Lovelace",
+  "employee_email": "ada@example.com",
   "amount": 42.50,
-  "category": "travel",
-  "description": "Taxi to airport",
+  "category": "software",
+  "description": "IDE subscription",
   "manager_email": "mgr@example.com"
 }
 
-### 2 — Valid expense >= $100, manager approves → approved
-# Step A: POST /expenses, copy orchestrationInstanceId from response body (or Location header).
-# Step B: POST /manager/{instanceId} with body below.
-# Step C: Poll status until completed; output.outcome should be "approved"
-POST {{baseUrl}}{{apiPath}}/expenses
+### 2) Valid expense >= $100, manager approves — expected: approved
+# @name startApprove
+POST {{baseUrl}}/api/expenses
 Content-Type: application/json
 
 {
-  "employee_name": "Alex Lee",
-  "employee_email": "alex@example.com",
+  "employee_name": "Grace Hopper",
+  "employee_email": "grace@example.com",
   "amount": 150.00,
+  "category": "travel",
+  "description": "Conference",
+  "manager_email": "mgr@example.com"
+}
+
+POST {{baseUrl}}/api/manager/{{instanceId}}
+Content-Type: application/json
+
+{
+  "approved": true
+}
+
+###############################################################################
+### 3) Valid expense >= $100, manager rejects — expected: rejected
+POST {{baseUrl}}/api/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Alan Turing",
+  "employee_email": "alan@example.com",
+  "amount": 200.00,
+  "category": "equipment",
+  "description": "Laptop",
+  "manager_email": "mgr@example.com"
+}
+
+### Then POST manager decision with approved: false (use new instance id from response)
+POST {{baseUrl}}/api/manager/{{instanceId}}
+Content-Type: application/json
+
+{
+  "approved": false
+}
+
+### 4) Valid expense >= $100
+POST {{baseUrl}}/api/expenses
+Content-Type: application/json
+
+{
+  "employee_name": "Edsger Dijkstra",
+  "employee_email": "edsger@example.com",
+  "amount": 175.00,
   "category": "meals",
   "description": "Team dinner",
-  "manager_email": "mgr@example.com"
+  "manager_email": "mgr@example.com",
+  "approval_timeout_seconds": 5
 }
 
-### 2b — Manager approval (replace INSTANCE_ID from step A response)
-@instanceId = PASTE_INSTANCE_ID_HERE
-POST {{baseUrl}}{{apiPath}}/manager/{{instanceId}}
+### 5) Missing required fields — expected: validation error
+POST {{baseUrl}}/api/expenses
 Content-Type: application/json
 
 {
-  "decision": "approve"
+  "employee_name": "Incomplete",
+  "employee_email": "bad@example.com",
+  "amount": 10,
+  "category": "supplies"
 }
 
-### 3 — Valid expense >= $100, manager rejects → rejected
-POST {{baseUrl}}{{apiPath}}/expenses
+### 6) Invalid category — expected: validation error
+POST {{baseUrl}}/api/expenses
 Content-Type: application/json
 
 {
-  "employee_name": "Alex Lee",
-  "employee_email": "alex@example.com",
-  "amount": 200.00,
-  "category": "supplies",
-  "description": "Office supplies",
-  "manager_email": "mgr@example.com"
-}
-
-### 3b — Manager rejection (replace INSTANCE_ID)
-@instanceReject = PASTE_INSTANCE_ID_HERE
-POST {{baseUrl}}{{apiPath}}/manager/{{instanceReject}}
-Content-Type: application/json
-
-{
-  "decision": "reject"
-}
-
-### 4 — Valid expense >= $100, no manager response → escalated
-# Do NOT call /manager/{instanceId}. Wait longer than APPROVAL_TIMEOUT_SECONDS (see local.settings).
-# Default example uses 90s; poll status until completed; output.outcome should be "escalated"
-POST {{baseUrl}}{{apiPath}}/expenses
-Content-Type: application/json
-
-{
-  "employee_name": "Alex Lee",
-  "employee_email": "alex@example.com",
-  "amount": 300.00,
-  "category": "equipment",
-  "description": "Monitor",
-  "manager_email": "mgr@example.com"
-}
-
-### 5 — Missing required fields → validation_error
-POST {{baseUrl}}{{apiPath}}/expenses
-Content-Type: application/json
-
-{
-  "employee_name": "Alex Lee",
-  "employee_email": "alex@example.com",
-  "amount": 50.00
-}
-
-### 6 — Invalid category → validation_error
-POST {{baseUrl}}{{apiPath}}/expenses
-Content-Type: application/json
-
-{
-  "employee_name": "Alex Lee",
-  "employee_email": "alex@example.com",
-  "amount": 50.00,
-  "category": "invalid_cat",
+  "employee_name": "Wrong Cat",
+  "employee_email": "cat@example.com",
+  "amount": 50,
+  "category": "invalid_category",
   "description": "Test",
   "manager_email": "mgr@example.com"
 }
-
-### Helper — status (replace STATUS_URL from 202 response body: statusQueryGetUri)
-# GET {{statusUrl}}

@@ -14,6 +14,12 @@
 
 .cursor/
 
+__blobstorage__/
+__azurite_db_blob__/
+__queuestorage__/
+__azurite_db_*
+
+
 # Azure Functions
 local.settings.json
 .python_packages/

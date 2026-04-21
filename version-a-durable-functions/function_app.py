@@ -5,19 +5,16 @@ from __future__ import annotations
 import json
 import logging
 import os
-import smtplib
 from datetime import timedelta
-from email.mime.text import MIMEText
-from typing import Any, Optional, Tuple
+from typing import Any, Dict
 
-import azure.durable_functions as df
 import azure.functions as func
+import azure.durable_functions as df
 
-bp = df.Blueprint()
+app = df.DFApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
-VALID_CATEGORIES = frozenset(
-    {"travel", "meals", "supplies", "equipment", "software", "other"}
-)
+_LOGGER = logging.getLogger(__name__)
+
 REQUIRED_FIELDS = (
     "employee_name",
     "employee_email",
@@ -26,225 +23,238 @@ REQUIRED_FIELDS = (
     "description",
     "manager_email",
 )
-MANAGER_EVENT = "ManagerApproval"
+VALID_CATEGORIES = frozenset(
+    ("travel", "meals", "supplies", "equipment", "software", "other")
+)
 
 
-def _parse_amount(raw: Any) -> Tuple[Optional[float], Optional[str]]:
-    try:
-        if raw is None:
-            return None, "amount is required"
-        v = float(raw)
-        if v < 0:
-            return None, "amount must be non-negative"
-        return v, None
-    except (TypeError, ValueError):
-        return None, "amount must be a number"
-
-
-@bp.activity_trigger(input_name="payload")
-def validate_expense(payload: dict[str, Any]) -> dict[str, Any]:
-    """Validate required fields and category; normalize amount."""
-    if not isinstance(payload, dict):
-        return {"valid": False, "errors": ["body must be a JSON object"], "normalized": None}
-
-    missing = [f for f in REQUIRED_FIELDS if f not in payload or payload[f] in (None, "")]
-    if missing:
-        return {
-            "valid": False,
-            "errors": [f"missing or empty: {', '.join(missing)}"],
-            "normalized": None,
-        }
-
-    cat = str(payload["category"]).strip().lower()
-    if cat not in VALID_CATEGORIES:
-        return {
-            "valid": False,
-            "errors": [f"invalid category '{payload['category']}'"],
-            "normalized": None,
-        }
-
-    amount, err = _parse_amount(payload.get("amount"))
-    if err:
-        return {"valid": False, "errors": [err], "normalized": None}
-
-    normalized = {
-        "employee_name": str(payload["employee_name"]).strip(),
-        "employee_email": str(payload["employee_email"]).strip(),
-        "amount": amount,
-        "category": cat,
-        "description": str(payload["description"]).strip(),
-        "manager_email": str(payload["manager_email"]).strip(),
-    }
-    return {"valid": True, "errors": [], "normalized": normalized}
-
-
-@bp.activity_trigger(input_name="payload")
-def notify_employee(payload: dict[str, Any]) -> dict[str, Any]:
-    """Send outcome email or log when NOTIFY_LOG_ONLY=true."""
-    expense = payload.get("expense") or {}
-    final_status = payload.get("final_status", "unknown")
-    mode = payload.get("approval_mode", "")
-    to_addr = expense.get("employee_email", "")
-    subject = f"Expense request — {final_status}"
-    body = (
-        f"Your expense request was processed.\n\n"
-        f"Outcome: {final_status}\n"
-        f"Approval path: {mode}\n"
-        f"Amount: {expense.get('amount')}\n"
-        f"Category: {expense.get('category')}\n"
-    )
-
-    log_only = os.environ.get("NOTIFY_LOG_ONLY", "true").lower() in ("1", "true", "yes")
-    if log_only:
-        logging.info("NOTIFY (log-only) to=%s: %s", to_addr, body)
-        return {"sent": False, "channel": "log"}
-
-    host = os.environ.get("SMTP_HOST", "").strip()
-    if not host:
-        logging.warning("NOTIFY_LOG_ONLY=false but SMTP_HOST empty; logging instead.")
-        logging.info("NOTIFY to=%s: %s", to_addr, body)
-        return {"sent": False, "channel": "log"}
-
-    port = int(os.environ.get("SMTP_PORT", "587"))
-    user = os.environ.get("SMTP_USER", "")
-    password = os.environ.get("SMTP_PASSWORD", "")
-    mail_from = os.environ.get("MAIL_FROM", user)
-
-    msg = MIMEText(body, "plain", "utf-8")
-    msg["Subject"] = subject
-    msg["From"] = mail_from
-    msg["To"] = to_addr
-
-    with smtplib.SMTP(host, port) as smtp:
-        smtp.starttls()
-        if user and password:
-            smtp.login(user, password)
-        smtp.sendmail(mail_from, [to_addr], msg.as_string())
-
-    return {"sent": True, "channel": "smtp"}
-
-
-@bp.orchestration_trigger(context_name="context")
-def expense_orchestrator(context: df.DurableOrchestrationContext):
-    raw = context.get_input()
-    expense = json.loads(raw) if isinstance(raw, str) else raw
-
-    validation = yield context.call_activity(validate_expense, expense)
-    if not validation["valid"]:
-        return {
-            "outcome": "validation_error",
-            "errors": validation["errors"],
-        }
-
-    normalized = validation["normalized"]
-    amount = float(normalized["amount"])
-
-    if amount < 100.0:
-        yield context.call_activity(
-            notify_employee,
-            {
-                "final_status": "approved",
-                "approval_mode": "auto",
-                "expense": normalized,
-            },
-        )
-        return {
-            "outcome": "approved",
-            "approval_mode": "auto",
-            "expense": normalized,
-        }
-
-    timeout_sec = int(os.environ.get("APPROVAL_TIMEOUT_SECONDS", "90"))
-    expiration = context.current_utc_datetime + timedelta(seconds=timeout_sec)
-    timeout_task = context.create_timer(expiration)
-    approval_task = context.wait_for_external_event(MANAGER_EVENT)
-    winner = yield context.task_any([approval_task, timeout_task])
-
-    if winner == approval_task:
-        if hasattr(timeout_task, "is_completed") and not timeout_task.is_completed:
-            timeout_task.cancel()
-        payload = approval_task.result
-        decision = (
-            (payload.get("decision") if isinstance(payload, dict) else str(payload)) or ""
-        ).lower()
-        if decision in ("approve", "approved"):
-            final_status = "approved"
-        else:
-            final_status = "rejected"
-
-        yield context.call_activity(
-            notify_employee,
-            {
-                "final_status": final_status,
-                "approval_mode": "manager",
-                "expense": normalized,
-            },
-        )
-        return {
-            "outcome": final_status,
-            "approval_mode": "manager",
-            "expense": normalized,
-        }
-
-    if hasattr(timeout_task, "is_completed") and not timeout_task.is_completed:
-        timeout_task.cancel()
-
-    yield context.call_activity(
-        notify_employee,
-        {
-            "final_status": "escalated",
-            "approval_mode": "escalated",
-            "expense": normalized,
-        },
-    )
-    return {
-        "outcome": "escalated",
-        "approval_mode": "escalated",
-        "expense": normalized,
-    }
-
-
-@bp.route(route="expenses", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
-@bp.durable_client_input(client_name="client")
-async def start_expense(req: func.HttpRequest, client: df.DurableOrchestrationClient):
+@app.route(route="expenses", methods=["POST"])
+@app.durable_client_input(client_name="client")
+async def start_expense(req: func.HttpRequest, client: df.DurableOrchestrationClient) -> func.HttpResponse:
+    """Start the expense orchestration with a JSON body (see test-durable.http)."""
     try:
         body = req.get_json()
     except ValueError:
         return func.HttpResponse(
-            json.dumps({"error": "Invalid JSON body"}),
+            json.dumps({"error": "Request body must be valid JSON"}),
             status_code=400,
             mimetype="application/json",
         )
 
-    instance_id = await client.start_new("expense_orchestrator", client_input=body)
-    logging.info("Started orchestration id=%s", instance_id)
+    if not isinstance(body, dict):
+        return func.HttpResponse(
+            json.dumps({"error": "Body must be a JSON object"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+
+    env_timeout = int(os.environ.get("APPROVAL_TIMEOUT_SECONDS", "120"))
+    timeout_sec = int(body.get("approval_timeout_seconds", env_timeout))
+    merged: Dict[str, Any] = {**body, "_approval_timeout_seconds": timeout_sec}
+
+    instance_id = await client.start_new(
+        "expense_orchestration",
+        client_input=merged,
+    )
     return client.create_check_status_response(req, instance_id)
 
 
-@bp.route(route="manager/{instance_id}", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
-@bp.durable_client_input(client_name="client")
-async def manager_decision(req: func.HttpRequest, client: df.DurableOrchestrationClient):
+@app.route(route="manager/{instance_id}", methods=["POST"])
+@app.durable_client_input(client_name="client")
+async def manager_decision(
+    req: func.HttpRequest,
+    client: df.DurableOrchestrationClient,
+) -> func.HttpResponse:
+    """Raise ManagerApproval for the orchestration instance (manager approve / reject)."""
     instance_id = req.route_params.get("instance_id")
     if not instance_id:
-        return func.HttpResponse("Missing instance_id", status_code=400)
-
-    try:
-        body = req.get_json()
-    except ValueError:
         return func.HttpResponse(
-            json.dumps({"error": "Invalid JSON"}),
+            json.dumps({"error": "instance_id is required"}),
             status_code=400,
             mimetype="application/json",
         )
 
-    decision = (body or {}).get("decision", "")
-    await client.raise_event(instance_id, MANAGER_EVENT, {"decision": decision})
+    try:
+        payload = req.get_json()
+    except ValueError:
+        return func.HttpResponse(
+            json.dumps({"error": "Request body must be valid JSON"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+
+    if not isinstance(payload, dict) or "approved" not in payload:
+        return func.HttpResponse(
+            json.dumps({"error": "Body must include boolean 'approved'"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+
+    approved = payload.get("approved")
+    if not isinstance(approved, bool):
+        return func.HttpResponse(
+            json.dumps({"error": "'approved' must be a boolean"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+
+    try:
+        await client.raise_event(instance_id, "ManagerApproval", payload)
+    except Exception as ex:  # noqa: BLE001 — surface client errors cleanly for HTTP
+        _LOGGER.exception("raise_event failed")
+        msg = str(ex)
+        code = 404 if "404" in msg or "not found" in msg.lower() else 400
+        return func.HttpResponse(
+            json.dumps({"error": msg}),
+            status_code=code,
+            mimetype="application/json",
+        )
+
     return func.HttpResponse(
         json.dumps({"status": "event_raised", "instance_id": instance_id}),
-        status_code=200,
+        status_code=202,
         mimetype="application/json",
     )
 
 
-app = func.FunctionApp()
-app.register_functions(bp)
+@app.orchestration_trigger(context_name="context")
+def expense_orchestration(context: df.DurableOrchestrationContext):
+    """Orchestrate validation, auto-approval, manager wait + timer (human interaction)."""
+    expense: Dict[str, Any] = context.get_input() or {}
+    timeout_seconds = int(expense.get("_approval_timeout_seconds", 120))
+
+    validation = yield context.call_activity("validate_expense", expense)
+    if not validation.get("valid"):
+        yield context.call_activity(
+            "send_expense_notification",
+            {
+                "employee_email": expense.get("employee_email", ""),
+                "employee_name": expense.get("employee_name", ""),
+                "outcome": "validation_error",
+                "detail": validation.get("error", "validation failed"),
+            },
+        )
+        return {
+            "outcome": "validation_error",
+            "error": validation.get("error"),
+        }
+
+    amount = float(validation["amount"])
+
+    if amount < 100.0:
+        yield context.call_activity(
+            "send_expense_notification",
+            {
+                "employee_email": expense["employee_email"],
+                "employee_name": expense["employee_name"],
+                "outcome": "approved",
+                "detail": "auto-approved (amount under $100)",
+                "amount": amount,
+                "category": validation["category"],
+            },
+        )
+        return {
+            "outcome": "approved",
+            "reason": "auto",
+            "amount": amount,
+        }
+
+    deadline = context.current_utc_datetime + timedelta(seconds=timeout_seconds)
+    timer_task = context.create_timer(deadline)
+    approval_task = context.wait_for_external_event("ManagerApproval")
+
+    winner = yield context.task_any([timer_task, approval_task])
+
+    if winner == timer_task:
+        yield context.call_activity(
+            "send_expense_notification",
+            {
+                "employee_email": expense["employee_email"],
+                "employee_name": expense["employee_name"],
+                "outcome": "escalated",
+                "detail": (
+                    "No manager response before timeout; recorded as escalated "
+                    "(still approved per policy)"
+                ),
+                "amount": amount,
+                "category": validation["category"],
+            },
+        )
+        return {
+            "outcome": "escalated",
+            "amount": amount,
+            "note": "timeout",
+        }
+
+    decision_raw = winner.result
+    if not isinstance(decision_raw, dict):
+        approved = False
+    else:
+        approved = bool(decision_raw.get("approved"))
+
+    if approved:
+        yield context.call_activity(
+            "send_expense_notification",
+            {
+                "employee_email": expense["employee_email"],
+                "employee_name": expense["employee_name"],
+                "outcome": "approved",
+                "detail": "approved by manager",
+                "amount": amount,
+                "category": validation["category"],
+            },
+        )
+        return {"outcome": "approved", "reason": "manager", "amount": amount}
+
+    yield context.call_activity(
+        "send_expense_notification",
+        {
+            "employee_email": expense["employee_email"],
+            "employee_name": expense["employee_name"],
+            "outcome": "rejected",
+            "detail": "rejected by manager",
+            "amount": amount,
+            "category": validation["category"],
+        },
+    )
+    return {"outcome": "rejected", "amount": amount}
+
+
+@app.activity_trigger(input_name="payload")
+def validate_expense(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate required fields and category; normalize amount and category."""
+    if not isinstance(payload, dict):
+        return {"valid": False, "error": "Invalid expense payload"}
+
+    for field in REQUIRED_FIELDS:
+        val = payload.get(field)
+        if val is None or (isinstance(val, str) and not val.strip()):
+            return {"valid": False, "error": f"Missing required field: {field}"}
+
+    try:
+        amount = float(payload["amount"])
+    except (TypeError, ValueError):
+        return {"valid": False, "error": "amount must be a number"}
+
+    if amount < 0:
+        return {"valid": False, "error": "amount must be non-negative"}
+
+    cat = str(payload["category"]).lower().strip()
+    if cat not in VALID_CATEGORIES:
+        return {"valid": False, "error": "Invalid category"}
+
+    return {"valid": True, "amount": amount, "category": cat}
+
+
+@app.activity_trigger(input_name="payload")
+def send_expense_notification(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Notify the employee (log locally; extend with SendGrid / SMTP in Azure)."""
+    outcome = payload.get("outcome", "unknown")
+    email = payload.get("employee_email", "")
+    detail = payload.get("detail", "")
+    line = (
+        f"[expense-notification] to={email!r} outcome={outcome!r} detail={detail!r} "
+        f"payload={json.dumps(payload, default=str)}"
+    )
+    _LOGGER.info(line)
+    return {"sent": True, "outcome": outcome, "logged": True}
