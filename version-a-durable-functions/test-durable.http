@@ -1,6 +1,6 @@
 @baseUrl = http://localhost:7070
 
-@instanceId = 486b50a0ff274322b20c355534252bea
+@instanceId = 4a6b8d593f4d448f85977bd98e42ea7e
 
 ### 1) Valid expense under $100 — expected: auto-approved
 POST {{baseUrl}}/api/expenses

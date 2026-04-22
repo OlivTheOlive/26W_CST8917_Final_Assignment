@@ -1,5 +1,3 @@
-"""Expense approval workflow — Azure Durable Functions (Python programming model v2)."""
-
 from __future__ import annotations
 
 import json
