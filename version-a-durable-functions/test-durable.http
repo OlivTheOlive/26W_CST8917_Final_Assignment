@@ -1,6 +1,6 @@
-@baseUrl = http://localhost:7071
+@baseUrl = http://localhost:7070
 
-@instanceId = a3d800930c2a464f8ace41455d7693e0
+@instanceId = 4ccf011fb5e440aea5bd6d8fc1fd58c6
 
 ### 1) Valid expense under $100 — expected: auto-approved
 POST {{baseUrl}}/api/expenses
@@ -16,19 +16,19 @@ Content-Type: application/json
 }
 
 ### 2) Valid expense >= $100, manager approves — expected: approved
-# @name startApprove
 POST {{baseUrl}}/api/expenses
 Content-Type: application/json
 
 {
-  "employee_name": "Grace Hopper",
-  "employee_email": "grace@example.com",
+  "employee_name": "Ada Lovelace",
+  "employee_email": "ada@example.com",
   "amount": 150.00,
-  "category": "travel",
-  "description": "Conference",
+  "category": "software",
+  "description": "IDE subscription",
   "manager_email": "mgr@example.com"
 }
 
+### Manager approves
 POST {{baseUrl}}/api/manager/{{instanceId}}
 Content-Type: application/json
 
